@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import logging
 from datetime import datetime
 from pathlib import Path
+from check import check
 load_dotenv()
 
 # Configuration
@@ -180,7 +181,7 @@ def run_verifier(
     scratchpad: Dict[str, Any],
     unit_tasks: str,
     tools_available: Optional[List[Dict[str, Any]]] = None,
-    max_retries: int = 3,
+    max_retries: int = 5,
     request_id: str = None,
 ):
     """
@@ -234,16 +235,18 @@ def run_verifier(
 
         * If satisfied: plain success message (e.g., `{"status":"success","message":"Task satisfied — no function calls required."}`)
         * If calling a function: return exactly the function call payload required by the execution environment (one function call object only).
-
+        * In tool call, if you are unsure about a parameter value, feel free to ask the user for the same.
         Focus on correctness and precision. Take one deliberate step at a time.  
     """
     
     # Build verifier messages with proper error handling
     verifier_messages = []    
     verifier_messages.append({"role": "system", "content": new_system_prompt})
-
+    verifier_messages.extend(messages)
     # Safely build message history with error handling
+    '''
     try:
+       
         for usr_msg in messages:
             if usr_msg["role"] == "tool":
                 verifier_messages.append({
@@ -264,7 +267,7 @@ def run_verifier(
                 })
 
         context_info = {
-            "Summary": scratchpad.get("turns_info", "No summary available"),
+            #"Summary": scratchpad.get("turns_info", "No summary available"),
             "current_state_analysis": scratchpad.get("current_state_analysis", "No state analysis available"),
             "candidate_tool_calls": candidate_calls,
         }
@@ -273,10 +276,21 @@ def run_verifier(
             "role": "user", 
             "content": f"Stage Analysis and candidate function calls:\n\n{json.dumps(context_info, indent=2)}\n\nPlease do a thorough analysis and return the function calls."
         })
+        
     except Exception as e:
         print(f"[VERIFIER ERROR] Failed to build messages: {e}")
         return create_empty_response(unit_tasks)
-
+    '''
+    context_info = {
+            #"Summary": scratchpad.get("turns_info", "No summary available"),
+            "current_state_analysis": scratchpad.get("current_state_analysis", "No state analysis available"),
+            "candidate_tool_calls": candidate_calls,
+        }
+        
+    verifier_messages.append({
+            "role": "user", 
+            "content": f"Stage Analysis and candidate function calls:\n\n{json.dumps(context_info, indent=2)}\n\nPlease do a thorough analysis and return the function calls."
+        })
     # Single retry loop with smart fallback
     result = None
     last_error = None
@@ -393,16 +407,31 @@ def run_verifier(
     
     # If we've exhausted all attempts, return empty response
     print(f"[VERIFIER] All {max_retries} attempts failed. Last error: {last_error}")
-    return create_empty_response(unit_tasks)
+    return create_empty_response(unit_tasks+" "+candidate_calls)
 
 def sanitize_messages(messages):
     allowed_keys = {"role", "content", "tool_calls", "tool_call_id", "name"}
-    
+
     cleaned = []
     for msg in messages:
+        # coerce to strings (handle None)
+        content_str = "" if msg.get("content") is None else str(msg.get("content"))
+        reasoning_str = "" if msg.get("reasoning_content") is None else str(msg.get("reasoning_content"))
+
+        # combine (space when both present)
+        if content_str and reasoning_str:
+            combined = content_str + " " + reasoning_str
+        else:
+            combined = content_str or reasoning_str  # whichever is non-empty (or "")
+
+        # keep only allowed keys from original message
         cleaned_msg = {k: v for k, v in msg.items() if k in allowed_keys}
+
+        # set the combined content (overwrites any existing content)
+        cleaned_msg["content"] = combined
+
         cleaned.append(cleaned_msg)
-    
+
     return cleaned
 
 @app.post("/v1/chat/completions")
@@ -416,9 +445,6 @@ async def chat_completions(request: Request, body: Any = Body(...)):
         print("=" * 80)
         print("COMPLETE USER REQUEST:")
         print("=" * 80)
-        #print(f"Request Headers: {dict(request.headers)}")
-        #print(f"Raw Body: {json.dumps(raw_body, indent=2, ensure_ascii=False)}")
-        print("=" * 80)
         
         messages = raw_body.get("messages", [])
         messages=sanitize_messages(messages)
@@ -426,13 +452,7 @@ async def chat_completions(request: Request, body: Any = Body(...)):
 
         print(f"[DEBUG] Received {len(tools)} tools from request")
         print(f"[DEBUG] Total messages: {len(messages)}")
-        
-        # Print each message clearly
-        #for i, msg in enumerate(messages):
-        #    print(f"Message {i+1}: {json.dumps(msg, indent=2, ensure_ascii=False)}")
-        #print("-" * 40)
-        
-        # If no tools available, pass directly to Groq model
+       
         if not tools:
             print("[DEBUG] No tools available, passing directly to Groq model")
             try:
@@ -480,6 +500,9 @@ async def chat_completions(request: Request, body: Any = Body(...)):
         request_id = f"srm_{int(time.time() * 1000)}"
         print(f"[DEBUG] Request ID: {request_id}")
         
+        if len(messages) <=3:
+            print("Checking for more information from user")
+            return check(messages)
         scratchpad,unit_tasks,candidate_calls=run_srm_pipeline(client,messages,reasoner_model,tools,request_id)
         
         # Log SRM pipeline results
