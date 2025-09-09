@@ -9,7 +9,8 @@ import re
 import time
 from loguru import logger
 import asyncio
-
+from dotenv import load_dotenv
+load_dotenv()
 app = FastAPI(title="GPT-OSS-120B Groq Tool Calling Server")
 
 # Groq client setup using OpenAI client with Groq base URL

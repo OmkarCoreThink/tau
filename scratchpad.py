@@ -16,7 +16,7 @@ def tool_awareness(client,model_name,tools):
     ]
     return call_llm(client, messages, model_name)
 
-def break_into_turns(client,model_name,messages,tool_understanding):
+def break_into_turns(client,model_name,prev_messages,tool_understanding):
     system_prompt = """
     You are tasked with analyzing a conversation transcript to verify if the intended tasks have been completed correctly. Focus strictly on the tasks explicitly mentioned, ignoring any extraneous information.
 
@@ -24,8 +24,8 @@ def break_into_turns(client,model_name,messages,tool_understanding):
     Analysis should only focus on what is asked although there might be some extra information. We should not focus things which are not explicitly asked.
 
     Your task is to identify and verify for each user request:
-    1. User requests (messages with role='user')
-    2. Tool calls made in response to each request
+    1. User requests and follow-up clarifications
+    2. Tool calls made in response to each requests
     3. Tool call results/outcomes
     4. The current state and what the user expects
     5. You do not have to plan to solve the user task, only analysis
@@ -38,6 +38,8 @@ def break_into_turns(client,model_name,messages,tool_understanding):
 
     ## Conversation Analysis
 
+    ### Rules to follow, Policies and Important Notes
+    
     ### User Requests and Tool Execution History
     #### Request 1: [Brief summary of the user's request]
     **User Message:** "[Full user message content]"
@@ -63,16 +65,17 @@ def break_into_turns(client,model_name,messages,tool_understanding):
     **Completion Status:** [Incomplete / Complete]  
     **Final Notes:** [...]
 
+    Take a note that the total number of requests cannot be more than 5 and the request information might be jumbled up. So make sure to put the requests in the correct order and do not miss any request or create unncessary requests.
     Output the entire analysis in a single markdown code block, ensuring it is well-structured and easy to read. Do not include any additional explanations or comments outside the code block.
     """
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Conversation transcript:\n{messages}"},
-        {"role": "user", "content": f"Tool Awareness:\n{tool_understanding}"}
+        {"role": "user","content":"Previous Conversation Transcript:\n"+json.dumps(prev_messages, indent=2)},
     ]
+
     return call_llm(client, messages, model_name)
 
-def check_if_anything_is_missing(turns_info,client,model_name,messages):
+def check_if_anything_is_missing(turns_info,client,model_name,prev_messages):
 
     system_prompt = """
     TASK:
@@ -125,13 +128,10 @@ def check_if_anything_is_missing(turns_info,client,model_name,messages):
    
     analysis_messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"BFCL_TRANSCRIPT:\n{messages},"},
         {"role": "user", "content": f"TRANSCRIPT_ANALYSIS:\n{turns_info}"},
-        #{"role": "user", "content": f"TOOL_AWARENESS:\n{tool_awarenes}"}
+        {"role": "user","content":"Previous Conversation Transcript:\n"+json.dumps(prev_messages, indent=2)},
     ]
-
     return call_llm(client, analysis_messages, model_name)
-
 
 def current_state_analysis(turns_info, client,model_name,messages,miss_info):
     system_prompt = (
@@ -140,6 +140,7 @@ def current_state_analysis(turns_info, client,model_name,messages,miss_info):
         
        "STEP 1 - CURRENT STATE MAPPING: Create a high-level map of the environment\n" 
        "- Review previous requests and their outcomes to understand the current state\n" 
+       "- Accumulate all the information about the system state from the entire transcript\n"
        "- Identify the current state of the system you are interacting with, whether it's a file system, database, or any other environment\n" 
        "- Mention all the information about your current environment that is relevant to the task at hand\n" 
        "- Do not make any assumptions regarding the system that you are dealing with and find out if you are not sure of your current state\n"
@@ -148,6 +149,7 @@ def current_state_analysis(turns_info, client,model_name,messages,miss_info):
        "- Understand the overall state of the working environment\n\n"
 
         "STEP 2 - REQUEST FOCUS: Analyze the latest user request\n"
+        "- Take a look at the feasibility of the latest user request\n"
         "- Identify the most recent task that needs completion\n"
         "- Determine if the request has been addressed or remains unmet\n"
         "- Note any constraints or errors that may impact fulfilling the request\n\n"
@@ -167,7 +169,7 @@ def current_state_analysis(turns_info, client,model_name,messages,miss_info):
         "- Try to find out what needs to be done first before starting the task i.e. do we have any pre-requisites to complete the task\n\n"
 
        "STEP 5 — NEXT ACTIONS (apply to the latest request only)\n\n"
-       "Produce a plain list of atomic what-to-do actions for the latest request, using only the current state. Follow these rules exactly:\n\n"
+       "Produce a plain list of atomic what-to-do actions for the latest request if feasible, using only the current state. Follow these rules exactly:\n\n"
        "1. Output format: a plain list with one action per line.\n"
        "2. Scope: include only actions that directly complete the latest request. Do not include requests for more information, diagnostics, investigation, or any work outside the user's explicit request.\n"
        "3. Atomicity: each action must be a single, simple, imperative sentence. Do not use compound or complex sentences. Avoid coordinating conjunctions (and, or), semicolons, commas that join clauses, or subordinate clauses.\n"
@@ -177,7 +179,7 @@ def current_state_analysis(turns_info, client,model_name,messages,miss_info):
        "7. Specificity: keep each action specific and unambiguous. Include identifiers when relevant (e.g., feature name, branch, build number, document name). Do not over-simplify to the point of losing necessary detail.\n"
        "8. Nothing remaining: if there are no remaining actions, return an empty list (i.e., no lines).\n"
        "9. Tone and extras: do not add explanations, notes, justifications, or commentary. Provide only the ordered action lines.\n\n"
-       "10. Do not ask the user for review. If you have all the information, go ahead and make the next action.\n\n"
+       "10. Do not ask the user for review or confirmations. If you have all the information, go ahead and make the next action.\n\n"
       
         "IMPORTANT: Use natural language descriptions throughout. Describe actions and outcomes in plain English. "
         "Be very very detailed about what is currently happening and what needs to be done next only for the latest unsolved request\n\n"
@@ -185,14 +187,21 @@ def current_state_analysis(turns_info, client,model_name,messages,miss_info):
         "Respond with your analysis directly in natural language. Focus on being factual and precise, "
         "and provide actionable insights about what should happen next.\n\n"
         
+        "SAMPLE OUTPUT:"
+        "**All the information we have till time**"
+        "**Request Focus**"
+        "**Error Analysis**"
+        "**Understanding the Task**"
+        "**Next Actions:**"
+
         "OUTPUT FORMAT: Ensure your response is strictly in markdown format."
     )
     
     analysis_messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"BFCL_TRANSCRIPT:\n{messages},"},
         {"role": "user", "content": f"TRANSCRIPT_ANALYSIS:\n{turns_info}"},
-        {"role": "user", "content": f"POSSIBILTY_OF_MISSING_INFORMATION:\n{miss_info}"}
+        {"role": "user","content":"Previous Conversation Transcript:\n"+json.dumps(messages, indent=2)},
+        {"role": "system", "content": "Try to be thorough and do leave any room in planning. Be very detailed in your analysis. Think of all the possibilities while keeping rules and Policies in mind."},
     ]
 
     return call_llm(client, analysis_messages, model_name)
@@ -207,6 +216,7 @@ def scratch_pad_generation(client,messages,model_name,tools):
     scratch = {}
     scratch["tool_awareness"] = tool_understanding
     scratch["turns_info"] = turns_info
+    scratch["miss_info"] = miss_info
     scratch["current_state_analysis"] = current_state
 
     return scratch
