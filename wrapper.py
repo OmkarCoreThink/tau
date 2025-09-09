@@ -183,232 +183,66 @@ def run_verifier(
     tools_available: Optional[List[Dict[str, Any]]] = None,
     max_retries: int = 5,
     request_id: str = None,
-):
-    """
-    Robust verifier that ensures proper tool calls are returned when needed.
-    
-    Args:
-        messages: Conversation history
-        candidate_calls: Candidate tool calls from reasoner
-        scratchpad: Context and analysis
-        unit_tasks: Current tasks
-        tools_available: Available tools
-        question: Question number (for logging)
-        step: Step number (for logging)
-        max_retries: Maximum retry attempts
-    
-    Returns:
-        OpenAI-compatible response with tool calls or empty response
-    """
-    print(f"[VERIFIER] Starting verification")
-    
-    # Handle explicit "No tool call needed" case
-    if candidate_calls == "No tool call needed":
-        print("[VERIFIER] No tool call needed, returning empty response")
-        return create_empty_response(unit_tasks)
-    # Safety check for tools availability
-    if not tools_available:
-        print("[VERIFIER] No tools available, returning empty response")
-        return create_empty_response(unit_tasks)
-    
-    new_system_prompt = """
-        You are an assistant that verifies and (if needed) repairs a *single* candidate_tool_call against the user's requested task, current state, and available tools. Follow these steps **in order**:
-        The idea is to solve the problem by doing one tool call at a time
+):      
+        messages.extend([{"role": "system", "content": f"Hints:\n {scratchpad['current_state_analysis']}"}])
+        messages.extend([{"role": "system", "content": f"Unit Task\n{unit_tasks}"}])
+        messages.extend([{"role": "system", "content": f"Possible Tool Call which you can make: \n{candidate_calls}"}])
 
-        0. **SUCCESS CHECK** — If the requested task is already satisfied (i.e., candidate calls array is empty or prior calls already completed the task), return a success message and **do not** make any function calls.
-        1. **ANALYZE** — Compare the candidate function call(s) to the user request and current state. Confirm the call is necessary and that it aligns with the available tools.
-        2. **VALIDATE** — Verify the candidate call uses a known tool, correct function name, required parameters, valid parameter types, and correct syntax. You must take a look at the tools shared with you for the same.
-        3. **REPAIR** — If validation fails, produce a corrected function call that fixes the errors (tool name, argument names/types, formatting). Represent all fixes only as function calls (no free-form answers). Do not ask questions or perform unrelated actions.
-        4. **FINALIZE** — When the candidate call is valid and appropriate, return that single function call. If the task is fully satisfied, return a success message and **no** function calls.
+        api_params = {
+            "model": base_model,
+            "messages": messages,
+            "reasoning_effort": "high",
+        }
+        api_params["tools"] = tools_available
 
-        **Hard rules (must follow):**
-        * Make sure to make a call when it is asked by the candidate call *
-        * If the candidate call list is empty thoroughly analyzed if the task is done, and if it is actually done, return no tool call and give a detailed reasoning for the same.
-        * Make **one and only one** function call per assistant response, and only call a different function than the candidate if you have a strong, explicit reason to do so.
-        * Output **only** the required function call (or only the success message when satisfied). No extra commentary or explanation.
-        * If you repair the candidate, return the corrected function call (one call per response).
-        * Do not repeat prior successful calls unless absolutely required by the current state.
-        * Do not take any actions not explicitly requested by the user.
-        * Iterate: if further validation or actions are needed after your call, continue in subsequent responses (one function call per response) until the task is complete.
-
-        **Output formats:**
-
-        * If satisfied: plain success message (e.g., `{"status":"success","message":"Task satisfied — no function calls required."}`)
-        * If calling a function: return exactly the function call payload required by the execution environment (one function call object only).
-        * In tool call, if you are unsure about a parameter value, feel free to ask the user for the same.
-        Focus on correctness and precision. Take one deliberate step at a time.  
-    """
-    
-    # Build verifier messages with proper error handling
-    verifier_messages = []    
-    verifier_messages.append({"role": "system", "content": new_system_prompt})
-    verifier_messages.extend(messages)
-    # Safely build message history with error handling
-    '''
-    try:
-       
-        for usr_msg in messages:
-            if usr_msg["role"] == "tool":
-                verifier_messages.append({
-                    "role": "tool",
-                    "tool_call_id": usr_msg.get("tool_call_id"),
-                    "content": usr_msg.get("content", ""),
-                })
-            elif "tool_calls" in usr_msg and usr_msg["tool_calls"]:
-                verifier_messages.append({
-                    "role": usr_msg["role"],
-                    "content": usr_msg.get("content", ""),
-                    "tool_calls": usr_msg["tool_calls"],
-                })
-            else:
-                verifier_messages.append({
-                    "role": usr_msg["role"],
-                    "content": usr_msg.get("content", ""),
-                })
-
-        context_info = {
-            #"Summary": scratchpad.get("turns_info", "No summary available"),
-            "current_state_analysis": scratchpad.get("current_state_analysis", "No state analysis available"),
-            "candidate_tool_calls": candidate_calls,
+        response = client.chat.completions.create(**api_params)
+        
+        # Check if response has tool calls
+        message = response.choices[0].message
+        has_tool_calls = hasattr(message, 'tool_calls') and message.tool_calls
+        
+        # Get response content
+        content = message.content if message.content else ""
+        
+        # Prepare the final response with hardcoded model name
+        final_response = {
+            "id": response.id,
+            "object": "chat.completion",
+            "created": response.created,
+            "model": "gpt-oss-120b",  # Hardcoded model name for response
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content
+                },
+                "finish_reason": response.choices[0].finish_reason
+            }],
+            "usage": response.usage.model_dump() if response.usage else {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
         }
         
-        verifier_messages.append({
-            "role": "user", 
-            "content": f"Stage Analysis and candidate function calls:\n\n{json.dumps(context_info, indent=2)}\n\nPlease do a thorough analysis and return the function calls."
-        })
-        
-    except Exception as e:
-        print(f"[VERIFIER ERROR] Failed to build messages: {e}")
-        return create_empty_response(unit_tasks)
-    '''
-    context_info = {
-            #"Summary": scratchpad.get("turns_info", "No summary available"),
-            "current_state_analysis": scratchpad.get("current_state_analysis", "No state analysis available"),
-            "candidate_tool_calls": candidate_calls,
-        }
-        
-    verifier_messages.append({
-            "role": "user", 
-            "content": f"Stage Analysis and candidate function calls:\n\n{json.dumps(context_info, indent=2)}\n\nPlease do a thorough analysis and return the function calls."
-        })
-    # Single retry loop with smart fallback
-    result = None
-    last_error = None
-    
-    for attempt in range(max_retries):
-        try:
-            print(f"[VERIFIER] Attempt {attempt + 1}/{max_retries}")
-            result = client.chat.completions.create(
-                        model=base_model,
-                        messages=verifier_messages,
-                        tools=tools_available,
-                        temperature=attempt*0.1,
-                        max_tokens=1024,
-                        stream=False,
-                    )
-            if result.choices[0].finish_reason == "tool_calls":
-                tool_calls=result.choices[0].message.tool_calls
-                print(format_tool_calls(tool_calls))
-                is_valid, validation_message = validate_tool_calls(tool_calls, tools_available)
-                if is_valid:
-                    # Log verifier results
-                    if request_id:
-                        verifier_input = {
-                            "candidate_calls": candidate_calls,
-                            "scratchpad": scratchpad,
-                            "unit_tasks": unit_tasks
-                        }
-                        log_verifier_results(request_id, verifier_input, result.model_dump())
-                    
-                    return result
-                else:
-                    print("Try Again")
-            else:
-                last_error = f"Unexpected finish_reason: {result.choices[0].finish_reason}"
-        except Exception as e:
-            print(f"[ERROR] Verifier call failed: {e}")
-            user_message = f"""
-            The previous model failed to make a correct function call with exact parameters. 
-            It sometimes adds the function name in arguments.
-            The error: {e}
-
-            Your task is to make a correct function call based on the available tools 
-            by extracting the correct arguments from the error.
-
-            *Bad Example:*
-            '{{"name": "<|constrain|>json", "arguments": {{"name": "cd", "arguments": {{"folder": "archive"}}}}}}'
-
-            *Good Example:*
-            '{{"name": "cd", "arguments": {{"folder": "archive"}}}}'
-
-            *Note:* Do not use "<|constrain|>json" or any other placeholder 
-            that is not in the tools list. Use the correct tool names as provided in the tools list.
-            Focus on correctness and precision. Take one deliberate step at a time."""
-            verifier_messages = [
-            {"role": "system", "content": "You are a function calling assistant. You are provided with available tools, use them to give appropriate function calls"},
-            {"role": "user", "content": user_message},
+        # Add tool calls to response if present
+        if has_tool_calls:
+            tool_calls=message.tool_calls
+            print(format_tool_calls(tool_calls))
+            final_response["choices"][0]["message"]["tool_calls"] = [
+                {
+                    "id": tool_call.id,
+                    "type": tool_call.type,
+                    "function": {
+                        "name": tool_call.function.name,
+                        "arguments": tool_call.function.arguments
+                    }
+                }
+                for tool_call in message.tool_calls
             ]
-           
-            result = client.chat.completions.create(
-                        model=base_model,
-                        messages=verifier_messages,
-                        tools=tools_available,
-                        temperature=0.0,
-                        max_tokens=1024,
-                        stream=False,
-                    )
-    
-            # Check if we got a valid response
-            finish_reason = result.choices[0].finish_reason
-            if finish_reason in ["tool_calls", "stop"]:
-                print(f"[VERIFIER] Got response with finish_reason: {finish_reason}")
-                
-                # Validate tool calls if present
-                tool_calls = result.choices[0].message.tool_calls
-                if tool_calls:
-                    is_valid, validation_message = validate_tool_calls(tool_calls, tools_available)
-                    if is_valid:
-                        print(f"[VERIFIER] Valid tool calls: {format_tool_calls(tool_calls)}")
-                        
-                        # Log verifier results
-                        if request_id:
-                            verifier_input = {
-                                "candidate_calls": candidate_calls,
-                                "scratchpad": scratchpad,
-                                "unit_tasks": unit_tasks
-                            }
-                            log_verifier_results(request_id, verifier_input, result.model_dump())
-                        
-                        return result
-                    else:
-                        print(f"[VERIFIER] Invalid tool calls: {validation_message}")
-                        last_error = f"Invalid tool calls: {validation_message}"
-                        # Try again with next attempt
-                        continue
-                else:
-                    # No tool calls - accept as completion if content suggests it
-                    content = result.choices[0].message.content or ""
-                    if content.strip():  # Has some content
-                        print("[VERIFIER] No tool calls, retrying")
-                        last_error = "No tool calls in response"
-                    else:
-                        print("[VERIFIER] Empty response, retrying")
-                        last_error = "Empty response with no tool calls"
-                    continue
-            else:
-                last_error = f"Unexpected finish_reason: {finish_reason}"
-                print(f"[VERIFIER] {last_error}")
-                continue
-                
-        except Exception as e:
-            last_error = str(e)
-            print(f"[VERIFIER RETRYING] Attempt {attempt + 1} failed: {e}")
-            continue
-    
-    # If we've exhausted all attempts, return empty response
-    print(f"[VERIFIER] All {max_retries} attempts failed. Last error: {last_error}")
-    return create_empty_response(unit_tasks+" "+candidate_calls)
-
+        
+        return final_response
+        
 def sanitize_messages(messages):
     allowed_keys = {"role", "content", "tool_calls", "tool_call_id", "name"}
 
