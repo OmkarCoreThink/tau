@@ -35,9 +35,10 @@ async def complete(req: ChatRequest):
     
     try:
         # Hardcoded model configuration
-        HARDCODED_MODEL = "Meta-Llama-3.3-70B-Instruct"
+        HARDCODED_MODEL = "DeepSeek-V3-0324"
         
         logger.info("=" * 80)
+        logger.info(f"Sambanova")
         logger.info(f"🚀 INCOMING REQUEST [{request_id}]")
         logger.info("=" * 80)
         logger.info(f"Model: {HARDCODED_MODEL} (hardcoded)")
@@ -70,7 +71,6 @@ async def complete(req: ChatRequest):
             "model": HARDCODED_MODEL,
             "messages": req.messages,
             "temperature": req.temperature,
-            "max_tokens": 32000,
             "stream": req.stream
         }
         
@@ -244,8 +244,8 @@ async def test_tools():
 if __name__ == "__main__":
     # Configuration
     host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", 7000))
-    workers = int(os.getenv("WORKERS", 12))
+    port = int(os.getenv("PORT", 7777))
+    workers = int(os.getenv("WORKERS", 1))
     
     logger.info("🚀 Starting GPT-OSS-120B Tool Calling Server")
     logger.info(f"Model: openai/gpt-oss-120b (hardcoded)")

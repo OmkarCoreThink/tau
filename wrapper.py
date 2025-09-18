@@ -132,7 +132,7 @@ def create_empty_response(unit_task):
             "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": base_model,
+            "model": "gpt-4.1-mini",  # Hardcoded model name for response
             "choices": [
                 {
                     "index": 0,
@@ -183,7 +183,7 @@ def run_verifier(
     tools_available: Optional[List[Dict[str, Any]]] = None,
     max_retries: int = 5,
     request_id: str = None,
-):      
+):                  
         messages.extend([{"role": "system", "content": f"Hints:\n {scratchpad['current_state_analysis']}"}])
         messages.extend([{"role": "system", "content": f"Unit Task\n{unit_tasks}"}])
         messages.extend([{"role": "system", "content": f"Possible Tool Call which you can make: \n{candidate_calls}"}])
@@ -209,12 +209,12 @@ def run_verifier(
             "id": response.id,
             "object": "chat.completion",
             "created": response.created,
-            "model": "gpt-oss-120b",  # Hardcoded model name for response
+            "model": "gpt-4.1-mini",  # Hardcoded model name for response
             "choices": [{
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": content
+                    "content": content,
                 },
                 "finish_reason": response.choices[0].finish_reason
             }],

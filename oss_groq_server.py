@@ -19,6 +19,11 @@ groq_client = AsyncOpenAI(
     api_key=os.getenv("GROQ_API_KEY")
 )
 
+#groq_client = AsyncOpenAI(
+#  base_url = "https://integrate.api.nvidia.com/v1",
+#  api_key=os.getenv("NVIDIA_API_KEY")
+#)
+
 class ChatRequest(BaseModel):
     messages: List[Dict[str, Any]]
     temperature: Optional[float] = 0.0
@@ -31,7 +36,7 @@ class ChatRequest(BaseModel):
 async def complete(req: ChatRequest):
     request_start_time = time.time()
     request_id = f"req-{int(time.time() * 1000)}"
-    
+    time.sleep(1)
     try:
         # Hardcoded model configuration
         HARDCODED_MODEL = "openai/gpt-oss-120b"
@@ -120,7 +125,7 @@ async def complete(req: ChatRequest):
             "id": response.id,
             "object": "chat.completion",
             "created": response.created,
-            "model": "gpt-oss-120b",  # Hardcoded model name for response
+            "model": "gpt-4.1-mini",  # Hardcoded model name for response
             "choices": [{
                 "index": 0,
                 "message": {

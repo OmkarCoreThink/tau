@@ -21,13 +21,17 @@ PORT = int(os.getenv("PORT", 7777))  # Different port to avoid conflicts
 base_url = "https://api.groq.com/openai/v1"
 api_key = os.environ.get("GROQ_API_KEY") 
 reasoner_model = "openai/gpt-oss-120b"
-base_model = "Meta-Llama-3.3-70B-Instruct"
+base_model = "deepseek/deepseek-r1-0528"
 
 client = OpenAI(base_url=base_url,api_key=api_key)
-samba_client = OpenAI(base_url="https://api.sambanova.ai/v1",api_key=os.getenv("SAMBANOVA_API_KEY"))
+samba_client = OpenAI( base_url="https://openrouter.ai/api/v1/",
+    api_key=os.getenv("OPEN_ROUTER_API_KEY"))
 # Logging Configuration
 LOGS_DIR = Path(__file__).parent / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
+
+print("BASE MODEL", base_model)
+print("REASONER MODEL", reasoner_model)
 
 def setup_logging():
     """Set up logging configuration for API and SRM pipeline logs"""

@@ -9,6 +9,8 @@ import re
 import time
 from loguru import logger
 import asyncio
+from dotenv import load_dotenv
+load_dotenv()
 
 app = FastAPI(title="GPT-OSS-120B Tool Calling Server")
 
@@ -33,7 +35,7 @@ async def complete(req: ChatRequest):
     
     try:
         # Hardcoded model configuration
-        HARDCODED_MODEL = "openai/gpt-oss-120b"
+        HARDCODED_MODEL = "deepseek/deepseek-r1-0528"
         
         logger.info("=" * 80)
         logger.info(f"🚀 INCOMING REQUEST [{request_id}]")
@@ -242,8 +244,8 @@ async def test_tools():
 if __name__ == "__main__":
     # Configuration
     host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", 7000))
-    workers = int(os.getenv("WORKERS", 12))
+    port = int(os.getenv("PORT", 7777))
+    workers = int(os.getenv("WORKERS", 1))
     
     logger.info("🚀 Starting GPT-OSS-120B Tool Calling Server")
     logger.info(f"Model: openai/gpt-oss-120b (hardcoded)")

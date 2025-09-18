@@ -1,5 +1,12 @@
 import json, re
 from utils import call_llm
+from pydantic import BaseModel, ConfigDict
+
+class PrerequisiteResponse(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    reasoning: str
+    parameter_value_available: bool
+    parameter_value: str
 
 def structured_tools(tools):
     result = {}
@@ -107,7 +114,7 @@ def check_parameter(tools,tool_call,messages, scratchpad,unit_task,client, model
             break
         except:
             if i == 2:
-                return f"No Tool call Needed. {tool_call}"
+                return f"No Tool call Needed. {tool_call}", unit_task
             tool_call = match_tool(unit_task,tools,client,model_name)
             continue
 
@@ -123,26 +130,25 @@ def check_parameter(tools,tool_call,messages, scratchpad,unit_task,client, model
         "- Extract parameter values that align with the user's overall goal\n"
         "- Use the tool description to understand the tool's purpose, behavior and parameters data types correctly\n"
         "- If provided, use the response schema to understand what the tool will return\n\n"
-        
-        "OUTPUT FORMAT - You MUST respond with ONLY a markdown code block containing the parameter value:\n"
-        "```\n"
-        "value\n"
-        "```\n\n"
+       """RESPONSE RULES (follow exactly):
+            1. Output **only one** markdown code block containing a single JSON object that matches the PrerequisiteResponse model above. No extra text, no explanations, no surrounding prose.
+            2. The JSON object must contain exactly three keys: "reasoning", "parameter_value_available", and "parameter_value". No additional keys allowed.
+            3. Types:
+            - "reasoning": a short, factual explanation (string) describing how you determined availability/value. Keep it concise and do **not** reveal chain-of-thought—only a brief summary of the basis for the decision.
+            - "parameter_value_available": boolean true/false.
+            - "parameter_value": the parameter's value as a string. If the parameter is not applicable or cannot be determined, set parameter_value_available to false and parameter_value to the string "NA".
+            4. If the parameter is unavailable or not applicable, also set "reasoning" to a short statement such as "parameter not found in input" or "insufficient information".
+            5. Do not include punctuation or formatting outside the JSON inside the markdown code block. The code block must contain only the JSON object and nothing else.
+            6. Ensure the JSON is valid (use double quotes for strings, true/false for booleans, no trailing commas).
 
-        "If the PARAMETER is not applicable or cannot be determined from the context\n" 
-        "OUTPUT"
-        "```NA```\n\n"
-        
-        "PARAMETER EXTRACTION RULES:\n"
-        "- Use the exact parameter names from the schema\n"
-        "- Extract values from the task description AND conversation context\n"
-        "- For file paths, directories, or names: use exact values mentioned in the conversation\n"
-        "- For numeric values: ensure they are extracted as numbers, not strings and be sure of float vs integer\n"
-        "- For choices/options: select based on user preferences revealed in context\n"
-        "- Do NOT add explanations, reasoning, or any text outside the code block\n"
-        "- For string values, do NOT use quotes unless the value itself contains quotes\n"
-        "- Your entire response should be just the code block, nothing else"
-    )
+            EXAMPLE (for reference only — do not include this example in your output):
+            ```json
+            {
+            "reasoning": "found exact key in prompt",
+            "parameter_value_available": true,
+            "parameter_value": "example_value"
+            }"""
+                )
 
     # Updated examples with markdown format
     few_shots = [
@@ -151,19 +157,22 @@ def check_parameter(tools,tool_call,messages, scratchpad,unit_task,client, model
             "TOOL": "compute_exchange_rate",
             "DESCRIPTION": "Convert an amount from one currency to another using current exchange rates",
             "PARAMETER": "(base_currency,integer)",
-            "OUTPUT": "```100```"
+            "parameter_value": "```100```",
+            "parameter_value_available": True,
         },
         {
             "TASK": "Find first-class fares from JFK to LHR on 2025-07-04",
             "TOOL": "get_flight_cost",
             "PARAMETER": "(travel_from, string)",
-            "OUTPUT": "```JFK```"
+            "parameter_value": "```JFK```",
+            "parameter_value_available": True,
         },
         {
             "TASK": "Check if 'final_report.pdf' exists in the document directory",
             "TOOL": "find",
             "PARAMETER": "(Destination_path,string)",
-            "OUTPUT": "```NA``` As the Destination_path is not provided in the context"
+            "parameter_value": "NA",
+            "parameter_value_available": False,
         }
     ]
     
@@ -189,7 +198,7 @@ def check_parameter(tools,tool_call,messages, scratchpad,unit_task,client, model
         
         example_parts.extend([
             "EXPECTED OUTPUT:",
-            f"{ex['OUTPUT']}\n"
+            f"{ex['parameter_value']}\n"
         ])
         
         examples_block += "\n".join(example_parts) + "\n"
@@ -206,21 +215,28 @@ def check_parameter(tools,tool_call,messages, scratchpad,unit_task,client, model
         {"role": "user", "content": f"CURRENT_STATE_ANALYSIS:\n{scratchpad['current_state_analysis']}"},
         {"role": "user", "content": f"UNIT_TASK:\n{unit_task},"},
         {"role": "user", "content": f"TOOL:\n{tool_call},"},
-        { "role": "user", "content": f"TOOL DESCRIPTION:\n{parameters['description']},"},
+        {"role": "user", "content": f"TOOL DESCRIPTION:\n{parameters['description']},"},
         {"role": "user", "content": f"PARAMETER SCHEMA:\n{json.dumps(param, indent=2)},"},
-        {"role": "user", "content": f"EXAMPLES:\n{examples_block}"}
+        {"role": "user", "content": f"EXAMPLES:\n{examples_block}"},
+        {"role": "system", "content": "Respond ONLY in the specified JSON format inside a markdown code block. If the user says he is not aware of the parameter value, assume something"}
         ]
-        output = call_llm(client, analysis_messages, model_name)
-        code_block_pattern = r'```(.*?)```'
-        code_matches = re.findall(code_block_pattern, output, re.DOTALL)
-        #if "na" in code_matches[0].strip().lower():
-        #    unit_task = f"Find the value of {param[0]} which can go as input to tool: {tool_call} with parameter description: {parameters['description']}"
-        #    if k >= 3:
-        #        values += "Parameter " + param[0] + " is required for this task but unable to find\n"
-            #return find_parameter(tools,unit_task,messages, scratchpad, client, model_name,k+1)
-        #else:
-        values += f"Parameter {param[0]} has value of {code_matches[0].strip()}\n"
-
+        response = client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=analysis_messages,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "prerequisite_check",
+                "schema": PrerequisiteResponse.model_json_schema(),
+            }
+        }
+        )
+        result = PrerequisiteResponse.model_validate_json(response.choices[0].message.content)
+        if result.parameter_value_available:
+            values += f"Parameter {param[0]} has value of {result.parameter_value}\n"
+        else:
+            print(f"Value of {param[0]} not found, asking user for the same")
+            return f"Parameter {param[0]} is required for this task '{unit_task}' but its value is not available. Ask the user for the same.", "Ask user for " + param[0] + " value which is required for the unit task: " + unit_task
     for param in parameters["not_required"]:
         analysis_messages = [
         {"role": "system", "content": system_prompt},
@@ -229,20 +245,31 @@ def check_parameter(tools,tool_call,messages, scratchpad,unit_task,client, model
         {"role": "user", "content": f"CURRENT_STATE_ANALYSIS:\n{scratchpad['current_state_analysis']}"},
         {"role": "user", "content": f"UNIT_TASK:\n{unit_task},"},
         {"role": "user", "content": f"TOOL:\n{tool_call},"},
-        { "role": "user", "content": f"TOOL DESCRIPTION:\n{parameters['description']},"},
+        {"role": "user", "content": f"TOOL DESCRIPTION:\n{parameters['description']},"},
         {"role": "user", "content": f"PARAMETER SCHEMA:\n{json.dumps(param, indent=2)},"},
-        {"role": "user", "content": f"EXAMPLES:\n{examples_block}"}
+        {"role": "user", "content": f"EXAMPLES:\n{examples_block}"},
+        {"role": "system", "content": "Respond ONLY in the specified JSON format inside a markdown code block. If the user says he is not aware of the parameter value, assume something"}
         ]
-        output = call_llm(client, analysis_messages, model_name)
-        code_block_pattern = r'```(.*?)```'
-        code_matches = re.findall(code_block_pattern, output, re.DOTALL)
-        if "na" in code_matches[0].strip().lower():
+        response = client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=analysis_messages,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "prerequisite_check",
+                "schema": PrerequisiteResponse.model_json_schema(),
+            }
+        }
+        )
+        result = PrerequisiteResponse.model_validate_json(response.choices[0].message.content)
+        
+        if result.parameter_value_available == False:
             unit_task = "Find the value of " + param[0] + f" which can go as input to tool: {tool_call} with parameter description: {parameters['description']}"
-            values += "Parameter " + param[0] + " is not required for this task\n"
+            values += "Parameter " + param[0] + " is not required for this task, but ask user once for the value\n"
         else:
-            values += "Parameter " + param[0] +" has value of "+code_matches[0].strip() + "\n"
+            values += "Parameter " + param[0] +" has value of "+result.parameter_value + "\n"
     
-    return values.strip() if values else "No parameters required for this tool call."
+    return values.strip() if values else "No parameters required for this tool call.", unit_task
     
 def find_parameter(tools,unit_task,messages, scratchpad, client, model_name,k):
     print(f"Finding parameter for unit task: {unit_task}")
@@ -250,6 +277,6 @@ def find_parameter(tools,unit_task,messages, scratchpad, client, model_name,k):
 
 def final_tool_call(unit_task,messages,scratch_pad, client, model_name,tools,k=0):
     tool_call = match_tool(unit_task,tools,client,model_name,k)
-    values = check_parameter(tools,tool_call,messages, scratch_pad,unit_task,client, model_name,k)
+    values,unit_task = check_parameter(tools,tool_call,messages, scratch_pad,unit_task,client, model_name,k)
 
     return values,unit_task

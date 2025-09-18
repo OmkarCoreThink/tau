@@ -1,222 +1,209 @@
 from utils import call_llm
 import json
 
-def tool_awareness(client,model_name,tools):
-    system_prompt = f"""
-    You are a Tools Analyst. You will be given a JSON array `tools` describing many tools. DO NOT call any tool. For each tool output a Markdown block (one header per tool) that fits max 3–4 short lines. Each tool block must include:
-    1) One-line Purpose (what the tool does). 
-    2) Inputs — list required params with types; mention optional params if any (comma-separated).
-    3) Output — main response fields & types. 
-    4) When to use / caution (one short phrase).
-    Preserve exact parameter names and types from the schema. If a field is missing, infer concisely. Return ONLY the Markdown summary for all tools.
-    """
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Tools info:\n{tools}"}
-    ]
-    return call_llm(client, messages, model_name)
-
 def break_into_turns(client,model_name,prev_messages,tool_understanding):
     system_prompt = """
-    You are tasked with analyzing a conversation transcript to verify if the intended tasks have been completed correctly. Focus strictly on the tasks explicitly mentioned, ignoring any extraneous information.
+    You are an expert function-calling conversation analyst. Your job: analyze the ENTIRE conversation transcript and produce a concise, evidence-based breakdown of every user request and its execution status.
 
-    Do not make any assumptions and put the analysis to the best of your knowledge.
-    Analysis should only focus on what is asked although there might be some extra information. We should not focus things which are not explicitly asked.
+    SCOPE
+    - Focus ONLY on the latest unsolved user request for any follow-up actions, but include all requests for context.
+    - Do NOT invent facts or assume tool executions that have no visible evidence.
 
-    Your task is to identify and verify for each user request:
-    1. User requests and follow-up clarifications
-    2. Tool calls made in response to each requests
-    3. Tool call results/outcomes
-    4. The current state and what the user expects
-    5. You do not have to plan to solve the user task, only analysis
-    6. Based on the previous tool call made, make sure to clearly understand the units of the tool call output based on the tool awareness shared with you\n"
-    7. Once the task is done, it doesn't need to be repeated again, so make sure to not repeat the task if it is already done\n"
-    8. Once the task is done, it doesn't need to confirm the message back to the user\n"
+    CORE RULES
+    1. COMPREHENSIVE: Identify ALL user requests present in the transcript (up to 5 requests; if more exist, include the 5 most recent).
+    2. EVIDENCE-BASED: Count tool calls only when there is visible execution evidence in the transcript (mark otherwise NOT_ATTEMPTED).
+    3. CHRONOLOGICAL: Order requests as they appeared.
+    4. STATUS: Mark each request as COMPLETE, INCOMPLETE, or BLOCKED.
+    5. LATEST UNSOLVED: Clearly identify which request is the latest unsolved one.
+    6. NO EXTRANEOUS TEXT: Output only the required structured analysis; do not add commentary outside the template.
 
-    Ensure that your analysis is thorough and only includes what is explicitly asked for. Do not miss anything.
-    Output your analysis in the following structured markdown format:
+    OUTPUT (strict; produce a single markdown code block)
+    For each request produce this block (repeat for each request up to the allowed max):
 
-    ## Conversation Analysis
-
-    ### Rules to follow, Policies and Important Notes
-    
-    ### User Requests and Tool Execution History
-    #### Request 1: [Brief summary of the user's request]
-    **User Message:** "[Full user message content]"
+    #### Request <N>: <one-line summary>
+    **User Message:** "<exact user message text>"
 
     **Tool Calls Made:**
-    - `tool_name(param1="value1", param2="value2")` - [Status: Success/Failed]
+    - `tool_name(arg1="value", ...)` — [Status: EXECUTED / FAILED / NOT_ATTEMPTED]  
+    (only list calls that appear in the transcript; if a call executed, include any visible result text)
 
-    **Results:**
-    - [Summary of what was accomplished or any errors]
+    **Results:**  
+    - Concise summary of what happened (include visible evidence: returned values, logs, error messages).
 
-    **Completion Status:** [Incomplete / Complete]  
-    **Final Notes:** [Any concise observations; e.g., why marked incomplete, missing evidence, or why it's complete]
+    **Completion Status:** [COMPLETE / INCOMPLETE / BLOCKED]  
+    **Final Notes:** Brief reason for the status and any missing evidence or blocker.
 
-    #### Request 2: [Brief summary]
-    **User Message:** "[Full user message content]"
+    At the very end, include a single-line summary:
+    **Latest Unsolved Request:** Request <N> — <one-line reason why it is unsolved>.
 
-    **Tool Calls Made:**
-    - `tool_name(params)` - [Status]
-
-    **Results:**
-    - [Summary of results including errors and map of things happened till time of the request]
-
-    **Completion Status:** [Incomplete / Complete]  
-    **Final Notes:** [...]
-
-    Take a note that the total number of requests cannot be more than 5 and the request information might be jumbled up. So make sure to put the requests in the correct order and do not miss any request or create unncessary requests.
-    Output the entire analysis in a single markdown code block, ensuring it is well-structured and easy to read. Do not include any additional explanations or comments outside the code block.
+    Strict formatting rules:
+    - Produce the full analysis in one markdown code block (no extra paragraphs outside it).
+    - Do not exceed 5 requests. If the conversation contains fewer than 5, include all.
+    - Keep language factual and succinct.
     """
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user","content":"Previous Conversation Transcript:\n"+json.dumps(prev_messages, indent=2)},
+        {"role": "user", "content": f"CONVERSATION TRANSCRIPT:\n{json.dumps(prev_messages, indent=2)}"},
     ]
 
     return call_llm(client, messages, model_name)
 
-def check_if_anything_is_missing(turns_info,client,model_name,prev_messages):
-
-    system_prompt = """
-    TASK:
-    You will be given a JSON object with `communication_history` (ordered earlier turns) and `latest_turn` (most recent user request). Your job: determine whether to carry out latest request, do we have enough **sufficient** information in all the provided messages and tool calls outputs.
-
-    DECISION:
-    - If sufficient -> output JSON: {"sufficient": true, "message": "no more information needed"}
-    - If not sufficient -> output JSON: {"sufficient": false, "message": "find out what tasks needs to be performed so that we get this information", "tasks": [...actionable tasks...]}
-
-    RULES:
-    1. Identify the request type (e.g., booking, deployment, file operation, report, code change).
-    2. Determine the **minimal** required fields/steps to execute that request (credentials, files, dates, formats, access, acceptance criteria).
-    3. Check `communication_history` for those items. Treat ambiguous or uncertain items as missing.
-    4. If missing, list concise, actionable tasks that, when completed, will produce the missing information.
-    5. Output **only** the JSON described above. No extra text, no explanation.
-
-    INPUT FORMAT (you will receive exactly):
-    {
-    "communication_history": [
-        {"speaker":"user"|"assistant","content":"..."},
-        ...
-    ],
-    "latest_turn": {"speaker":"user"|"assistant","content":"..."}
-    }
-
-    OUTPUT FORMAT (must be valid JSON only):
-    - Sufficient case:
-    {
-    "sufficient": true,
-    "message": "no more information needed"
-    }
-    - Insufficient case:
-    {
-    "sufficient": false,
-    "message": "find out what tasks needs to be performed so that we get this information",
-    "tasks": [
-        "Task 1 (actionable and specific)",
-        "Task 2",
-        ...
-    ]
-    }
-
-    BEHAVIOR NOTES:
-    - Prefer minimal task lists (only what's necessary).
-    - Use plain, specific actions (e.g., "Upload the repo URL and grant read/write access", "Provide passport number, nationality, expiry").
-    - Do not ask questions in the output; state tasks.
-    - Always return valid JSON and nothing else.
-
-        """
-   
-    analysis_messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"TRANSCRIPT_ANALYSIS:\n{turns_info}"},
-        {"role": "user","content":"Previous Conversation Transcript:\n"+json.dumps(prev_messages, indent=2)},
-    ]
-    return call_llm(client, analysis_messages, model_name)
-
-def current_state_analysis(turns_info, client,model_name,messages,miss_info):
+def current_state_analysis(turns_info, client,model_name,messages):
     system_prompt = (
-        "You are an expert at analyzing function calling conversations to determine the current state and propose the next action for the latest user request.\n\n"
-        "Your task is to thoroughly examine the entire transcript to understand what has been done and what remains, ensuring no repetition of steps.\n\n"
-        
-       "STEP 1 - CURRENT STATE MAPPING: Create a high-level map of the environment\n" 
-       "- Review previous requests and their outcomes to understand the current state\n" 
-       "- Accumulate all the information about the system state from the entire transcript\n"
-       "- Identify the current state of the system you are interacting with, whether it's a file system, database, or any other environment\n" 
-       "- Mention all the information about your current environment that is relevant to the task at hand\n" 
-       "- Do not make any assumptions regarding the system that you are dealing with and find out if you are not sure of your current state\n"
-       "- Note any data that has been loaded or connections established\n" 
-       "- Based on the previous tool call made, make sure to clearly understand the units of the tool call output based on the tool awareness shared with you\n"
-       "- Understand the overall state of the working environment\n\n"
+    "You are an expert function-calling conversation analyst. Your job: analyze the LATEST UNSOLVED user request and determine how to complete it.\n\n"
+    
+    "SCOPE: Focus ONLY on the current unsolved request. Use the conversation breakdown as context but analyze only the latest incomplete task.\n\n"
+    
+    "CORE PRINCIPLES:\n"
+    "1. TASK-FOCUSED: Primary goal is to solve the user's request effectively and completely\n"
+    "2. POLICY-AWARE: Identify relevant policies upfront and clearly flag when actions conflict with them\n"
+    "3. EVIDENCE-BASED: Only count actions with visible execution proof in transcript\n"
+    "4. SOLUTION-ORIENTED: Explore ALL possibilities, including alternative approaches when policies create constraints\n"
+    "5. AUTONOMOUS: Make reasonable assumptions, ask users only when critical\n"
+    "6. PRECISE: Distinguish EXECUTED vs PLANNED vs NEEDED actions clearly\n"
+    "7. THOROUGH: Identify ALL variables needed before attempting solutions\n\n"
+    
+    "KEY WORKFLOWS:\n"
+    "- Entity Lookup: ID search → get_user_details(ID) → alternative searches if needed\n"
+    "- Operations: verify prerequisites → execute → handle errors with alternatives\n"
+    "- Searches: exact → broaden criteria → alternative methods → related queries\n\n"
+    
+    "ASK USERS ONLY FOR:\n"
+    "- Critical missing info that cannot be inferred from context\n"
+    "- Destructive actions needing confirmation\n"
+    "- Security credentials\n"
+    "- Significantly different outcome interpretations\n"
+    "BALANCE: Don't assume critical details, but infer reasonable defaults from context\n\n"
+    
+    "EXECUTION VERIFICATION:\n"
+    "- EXECUTED: Tool call with visible results/errors\n"
+    "- PLANNED: Discussed but no execution evidence\n"
+    "- NEEDED: Required next actions\n"
+    "- State 'NO EXECUTIONS FOUND' if no tool calls occurred\n\n"
+)
 
-        "STEP 2 - REQUEST FOCUS: Analyze the latest user request\n"
-        "- Take a look at the feasibility of the latest user request\n"
-        "- Identify the most recent task that needs completion\n"
-        "- Determine if the request has been addressed or remains unmet\n"
-        "- Note any constraints or errors that may impact fulfilling the request\n\n"
-        
-        "STEP 3 - ERROR ANALYSIS: Examine any tool call outcomes for the current request\n"
-        "- Review the results of tool calls made in response to the current request\n"
-        "- Identify any errors or unexpected outcomes from these tool calls\n"
-        "- Consider how these errors impact the ability to fulfill the request\n\n"
-        
-        "STEP 4 - UNDERSTSNDING THE  TASK\n"
-        "- Analyze the task at hand and understand what is being asked\n"
-        "- Identify the specific actions that need to be taken to complete the task\n"
-        "- Break down the task into smaller, manageable steps\n"
-        "- Do do over-simplify the task, rather do a detailed analysis\n"
-        "- Do not make assumptions of the starting position and if unsure, add it to your tasks to find the starting position\n"
-        "- Once the task is done, it doesn't need to confirm the message back to the user\n"
-        "- Try to find out what needs to be done first before starting the task i.e. do we have any pre-requisites to complete the task\n\n"
+    current_state_mapping = (
+    "CURRENT STATE MAPPING\n"
+    "Analyze what has actually been executed vs planned FOR THE LATEST UNSOLVED REQUEST.\n\n"
+    
+    "OUTPUTS REQUIRED:\n"
+    "- EXECUTED ACTIONS: Tool calls with visible results/errors only\n"
+    "- AVAILABLE DATA: Information actually obtained from transcript\n"
+    "- CONSTRAINTS: Known limitations (permissions, rate limits, etc.)\n"
+    "- UNKNOWNS: Missing info needed to proceed\n"
+    "- ENVIRONMENT: System type and current state\n"
+    "- ASSUMPTIONS: What you're inferring and why\n"
+)
 
-       "STEP 5 — NEXT ACTIONS (apply to the latest request only)\n\n"
-       "Produce a plain list of atomic what-to-do actions for the latest request if feasible, using only the current state. Follow these rules exactly:\n\n"
-       "1. Output format: a plain list with one action per line.\n"
-       "2. Scope: include only actions that directly complete the latest request. Do not include requests for more information, diagnostics, investigation, or any work outside the user's explicit request.\n"
-       "3. Atomicity: each action must be a single, simple, imperative sentence. Do not use compound or complex sentences. Avoid coordinating conjunctions (and, or), semicolons, commas that join clauses, or subordinate clauses.\n"
-       "4. No how-to: do not include implementation steps, commands, methods, tool names, or procedural details. State what to do, not how to do it.\n"
-       "5. No repetition: do not restate actions that are already completed or duplicated elsewhere.\n"
-       "6. Sequence: list atomic actions in the precise order they should be executed to finish the request as requested by the user.\n"
-       "7. Specificity: keep each action specific and unambiguous. Include identifiers when relevant (e.g., feature name, branch, build number, document name). Do not over-simplify to the point of losing necessary detail.\n"
-       "8. Nothing remaining: if there are no remaining actions, return an empty list (i.e., no lines).\n"
-       "9. Tone and extras: do not add explanations, notes, justifications, or commentary. Provide only the ordered action lines.\n\n"
-       "10. Do not ask the user for review or confirmations. If you have all the information, go ahead and make the next action.\n\n"
-      
-        "IMPORTANT: Use natural language descriptions throughout. Describe actions and outcomes in plain English. "
-        "Be very very detailed about what is currently happening and what needs to be done next only for the latest unsolved request\n\n"
-        
-        "Respond with your analysis directly in natural language. Focus on being factual and precise, "
-        "and provide actionable insights about what should happen next.\n\n"
-        
-        "SAMPLE OUTPUT:"
-        "**All the information we have till time**"
-        "**Request Focus**"
-        "**Error Analysis**"
-        "**Understanding the Task**"
-        "**Next Actions:**"
+    request_focus = (
+    "REQUEST FOCUS ANALYSIS\n"
+    "Define the LATEST UNSOLVED user request and determine how to achieve it.\n\n"
+    
+    "OUTPUTS REQUIRED:\n"
+    "- POLICY REQUIREMENTS: First, identify ALL policies that apply to this task (data access, user privacy, modification rules, etc.)\n"
+    "- USER REQUEST: One clear sentence of what user wants\n"
+    "- DELIVERABLES: Exact outputs and success criteria\n"
+    "- ALL VARIABLES NEEDED: Complete list of required data/parameters (mark AVAILABLE/MISSING)\n"
+    "- POLICY ANALYSIS: Identify any policy conflicts and clearly state if the request violates policies\n"
+    "- FEASIBILITY: Achievable? If policy conflicts exist, clearly state them and provide alternative approaches\n"
+    "- ASSUMPTIONS: What you're inferring and confidence level (HIGH/MEDIUM/LOW)\n"
+    "- ACTION PLAN: 3-5 concrete next steps with alternatives (note policy considerations where relevant)\n"
+    "- CRITICAL: If user ID found → immediately call get_user_details(user_id)\n"
+)
 
-        "OUTPUT FORMAT: Ensure your response is strictly in markdown format."
+    error_analysis = (
+    "ERROR ANALYSIS\n"
+    "Examine what actually executed and what went wrong FOR THE LATEST UNSOLVED REQUEST.\n\n"
+    
+    "OUTPUTS REQUIRED:\n"
+    "- EXECUTION STATUS: List actual tool calls with EXECUTED/FAILED/NOT_ATTEMPTED\n"
+    "- RESULTS vs EXPECTED: What happened vs what was intended\n"
+    "- ERROR DETAILS: Specific error messages, codes, root causes\n"
+    "- ALTERNATIVE APPROACHES: 2-3 different methods to try\n"
+    "- IMMEDIATE FIXES: Concrete steps to resolve issues\n"
+    "- If NO executions found, state this and recommend what to do\n"
+)
+    understanding_task = (
+    "WHAT REMAINS\n"
+    "Identify what's completed vs what still needs to be done.\n\n"
+    
+    "OUTPUTS REQUIRED:\n"
+    "- PROGRESS: What's actually been completed (with evidence)\n"
+    "- REMAINING TASKS: What still needs to be done\n"
+    "- BLOCKERS: What's preventing progress and how to resolve\n"
+    "- MULTIPLE PATHS: Primary approach + 2 alternatives for each task\n"
+    "- PRIORITIES: P0/P1/P2 for each remaining item\n"
+    "- NEXT ACTIONS: 5-8 concrete immediate steps\n"
+)
+
+    next_actions = (
+    "NEXT ACTIONS\n"
+    "List immediate, actionable steps to complete the LATEST UNSOLVED user request.\n\n"
+    
+    "FORMAT: One action per line, imperative form, no bullets\n"
+    "SCOPE: Only actions for the current request\n"
+    "ORDER: Sequence to execute for completion\n"
+    
+    "Examples:\n"
+    "Call get_user_details with user ID 12345\n"
+    "Search flights from LAX to JFK on 2024-01-15\n"
+    "Update customer preferences in database\n"
+    "\nREQUIREMENT: Ensure all needed variables are identified before proceeding\n"
+)
+
+    final_instructions = (
+        "OUTPUT REQUIREMENTS:\n"
+        "- Use clear markdown format with sections\n"
+        "- Be specific and actionable\n"
+        "- PRIMARY FOCUS: Solve the user's request - be solution-oriented\n"
+        "- POLICY HANDLING: Check policy compliance and clearly state when conflicts prevent task completion\n"
+        "- Always provide multiple solution paths, including alternatives when policy constraints exist\n"
+        "- State assumptions and confidence levels (HIGH/MEDIUM/LOW)\n"
+        "- Focus on what can be done next, not just problems\n"
+        "- If user ID obtained → immediately call get_user_details(user_id)\n"
+        "- Identify ALL required variables before recommending actions\n"
+        "- When policy violations make a request impossible, clearly explain why and suggest alternative approaches\n"
     )
     
+    # Define section names for better structure
+    section_names = [
+        "Current State Mapping",
+        "Request Focus Analysis", 
+        "Error Analysis",
+        "Understanding What Remains",
+        "Next Actions",
+    ]
+    
+    prompts = [current_state_mapping, request_focus, error_analysis, understanding_task, next_actions]
+    
+    # Simple format - clean section-by-section analysis
+    current_state_analysis = ""
+    
+    for i, (section_name, prompt) in enumerate(zip(section_names, prompts)):
+        system_prompt+= f"\n\n{section_name}\n\n{prompt}\n\n"
     analysis_messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"TRANSCRIPT_ANALYSIS:\n{turns_info}"},
-        {"role": "user","content":"Previous Conversation Transcript:\n"+json.dumps(messages, indent=2)},
-        {"role": "system", "content": "Try to be thorough and do leave any room in planning. Be very detailed in your analysis. Think of all the possibilities while keeping rules and Policies in mind."},
+        {"role": "user", "content": f"CONVERSATION_TRANSCRIPT:\n{json.dumps(messages, indent=2)}"},
+        {"role": "system", "content": f"ADDITIONAL_INSTRUCTIONS:\n{final_instructions}"},
+        {"role": "system", "content": "Try to be thorough and do not leave any room in planning. Be very detailed in your analysis. Think of all the possibilities while keeping rules and Policies in mind. FOCUS: Prioritize solving the user's task effectively. When policies create constraints, clearly identify them and explain if they prevent task completion, then suggest practical alternatives that still achieve the user's goals."},
     ]
 
-    return call_llm(client, analysis_messages, model_name)
+    section_result = call_llm(client, analysis_messages, model_name)
+    
+    # Build current context for next section (simple format)
+    current_state_analysis += f"\n## {section_name}\n{section_result}\n"
+    
+    return current_state_analysis
 
 def scratch_pad_generation(client,messages,model_name,tools):
-    #tool_understanding = tool_awareness(client, model_name, tools)
     tool_understanding = json.dumps(tools, indent=2)  # Use JSON dump for better formatting
     turns_info = break_into_turns(client, model_name, messages,tool_understanding)
-    miss_info = check_if_anything_is_missing(turns_info, client, model_name, messages)
-    current_state = current_state_analysis(turns_info, client, model_name, messages,miss_info)
+    current_state_result = current_state_analysis(turns_info, client, model_name, messages)
 
     scratch = {}
     scratch["tool_awareness"] = tool_understanding
     scratch["turns_info"] = turns_info
-    scratch["miss_info"] = miss_info
-    scratch["current_state_analysis"] = current_state
+    scratch["current_state_analysis"] = current_state_result
 
     return scratch

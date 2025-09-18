@@ -98,7 +98,7 @@ def unit_task(scratchpad, messages,client, model_name):
     new_msgs = [
     {"role": "user", "content": f"TRANSCRIPT_ANALYSIS:\n{scratchpad['turns_info']}"},
     {"role": "user", "content": f"CURRENT_STATE_ANALYSIS:\n{scratchpad['current_state_analysis']}"},
-    {"role": "system", "content": f"UNIT_TASK_INSTRUCTIONS:\nCreate a single atomic unit task that advances the LATEST unsolved request using ONLY the information provided above. It should be pure natural language and does not include any tool calls or function calls. It should be a simple sentence and should not include AND"}
+    {"role": "system", "content": f"UNIT_TASK_INSTRUCTIONS:\nCreate a single atomic unit task that advances the LATEST unsolved request using ONLY the information provided above. It should be pure natural language and does not include any tool calls or function calls. It should be a simple sentence and should not include AND. Do not ask unnecessary questions to the user."}
     ]
     analysis_messages.extend(new_msgs)
     output = call_llm(client, analysis_messages, model_name)
